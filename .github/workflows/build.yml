@@ -1,0 +1,68 @@
+name: Build Discord AppImage
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Get Last Built Version
+        id: last_build
+        run: echo "version=$(cat last_version.txt || echo '0.0.0')" >> $GITHUB_OUTPUT
+
+      - name: Get Latest Discord Version
+        id: get_latest_version
+        run: |
+          FINAL_URL=$(curl -s -L -w "%{url_effective}" -o /dev/null "https://discord.com/api/download?platform=linux&format=deb")
+          VERSION=$(echo "$FINAL_URL" | grep -oP '(?<=linux/)[0-9]+\.[0-9]+\.[0-9]+')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Install Headless Dependencies
+        if: steps.get_latest_version.outputs.version != steps.last_build.outputs.version
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libnss3 libgbm1 libasound2t64 libsecret-1-0
+
+      - name: Build AppImage
+        id: build
+        if: steps.get_latest_version.outputs.version != steps.last_build.outputs.version
+        run: |
+          chmod +x build-discord-appimage.sh
+          xvfb-run -a ./build-discord-appimage.sh
+
+      - name: Create or Update Release
+        if: steps.build.outputs.appimage_name
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=${{ steps.get_latest_version.outputs.version }}
+          APPIMAGE_NAME=${{ steps.build.outputs.appimage_name }}
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "$APPIMAGE_NAME" --clobber
+          else
+            gh release create "$VERSION" \
+              --title "Release $VERSION" \
+              "$APPIMAGE_NAME"
+          fi
+
+      - name: Commit New Version
+        if: steps.build.outputs.appimage_name
+        run: |
+          echo "${{ steps.get_latest_version.outputs.version }}" > last_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last_version.txt
+          git commit -m "chore: Update last built Discord version to ${{ steps.get_latest_version.outputs.version }}"
+          git push
